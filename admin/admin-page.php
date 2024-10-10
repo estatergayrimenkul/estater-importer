@@ -1,0 +1,45 @@
+<?php
+if (!defined('ABSPATH')) {
+    exit;
+}
+?>
+
+<div class="wrap">
+    <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+    
+    <form method="post" action="options.php">
+        <?php
+        settings_fields('property_importer_settings');
+        do_settings_sections('property_importer_settings');
+        submit_button('Ayarları Kaydet');
+        ?>
+    </form>
+    
+    <hr>
+    
+    <h2>İçe Aktarma İşlemi</h2>
+    <div class="import-stats">
+        <p>Toplam Mülk: <span id="total-properties">0</span></p>
+        <p>İçe Aktarılan: <span id="imported-properties">0</span></p>
+        <p>Kuyrukta: <span id="queued-properties">0</span></p>
+    </div>
+    
+    <button id="start-import" class="button button-primary">İçe Aktarmayı Başlat</button>
+    
+    <hr>
+    
+    <h2>Webhook ve Cron Ayarları</h2>
+    <form method="post" action="options.php">
+        <?php
+        settings_fields('property_importer_webhook_settings');
+        do_settings_sections('property_importer_webhook_settings');
+        submit_button('Webhook Ayarlarını Kaydet');
+        ?>
+    </form>
+    
+    <div class="cron-settings">
+        <h3>Cron Ayarları</h3>
+        <p>Şu anki cron durumu: <span id="cron-status"><?php echo wp_next_scheduled('property_importer_cron') ? 'Aktif' : 'Pasif'; ?></span></p>
+        <button id="toggle-cron" class="button button-secondary"><?php echo wp_next_scheduled('property_importer_cron') ? 'Cron\'u Durdur' : 'Cron\'u Başlat'; ?></button>
+    </div>
+</div>
