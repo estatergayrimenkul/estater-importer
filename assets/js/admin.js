@@ -57,6 +57,27 @@ jQuery(document).ready(function($) {
                 })
                 .fail(handleAjaxError);
         });
+
+        $('#regenerate-secret').on('click', function() {
+            $.ajax({
+                url: ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'regenerate_webhook_secret',
+                    nonce: property_importer_ajax.nonce
+                },
+                dataType: 'json',
+                success: function(response) {
+                    if (response.success) {
+                        $('#webhook-secret').text(response.data.new_secret);
+                        alert('Yeni webhook secret oluşturuldu.');
+                    } else {
+                        alert('Hata oluştu: ' + response.data);
+                    }
+                },
+                error: handleAjaxError
+            });
+        });
     } catch (error) {
         console.error('Property Importer Error:', error);
     }

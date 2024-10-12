@@ -34,6 +34,7 @@ class PropertyImporter {
         $this->define_constants();
         $this->load_dependencies();
         $this->register_hooks();
+        $this->register_webhook_endpoint();
     }
 
     private function define_constants() {
@@ -58,6 +59,7 @@ class PropertyImporter {
         add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_scripts']);
         add_action('admin_init', [$this, 'register_webhook_settings']);
         add_action('property_importer_sync_cron', [$this, 'sync_properties']);
+        add_action('wp_ajax_regenerate_webhook_secret', [$this, 'regenerate_webhook_secret']);
         register_activation_hook(__FILE__, [$this, 'activate_cron']);
         register_deactivation_hook(__FILE__, [$this, 'deactivate_cron']);
     }
@@ -107,20 +109,27 @@ class PropertyImporter {
 
     public function start_import() {
         error_log('start_import metodu başladı');
-        check_ajax_referer('property_importer_nonce', 'nonce');
-        if (!current_user_can('manage_options')) {
-            error_log('Yetkisiz erişim');
-            wp_send_json_error('Yetkisiz erişim.');
+        
+        // AJAX isteği için nonce kontrolü yap
+        if (defined('DOING_AJAX') && DOING_AJAX) {
+            check_ajax_referer('property_importer_nonce', 'nonce');
+            if (!current_user_can('manage_options')) {
+                error_log('Yetkisiz erişim');
+                wp_send_json_error('Yetkisiz erişim.');
+            }
         }
         
         update_option('property_importer_is_running', true);
         wp_schedule_single_event(time(), 'property_importer_cron');
         
         error_log('start_import metodu tamamlandı');
-        wp_send_json_success([
-            'message' => 'İçe aktarma başlatıldı.',
-            'is_running' => true
-        ]);
+        
+        if (defined('DOING_AJAX') && DOING_AJAX) {
+            wp_send_json_success([
+                'message' => 'İçe aktarma başlatıldı.',
+                'is_running' => true
+            ]);
+        }
     }
 
     public function stop_import() {
@@ -237,7 +246,7 @@ class PropertyImporter {
         }
 
         update_option('property_importer_is_running', false);
-        $this->log('info', "İçe aktarma tamamlandı. Toplam: $total, Başarılı: $imported, Hata: $errors, Silinen: " . count($properties_to_delete));
+        $this->log('info', "çe aktarma tamamlandı. Toplam: $total, Başarılı: $imported, Hata: $errors, Silinen: " . count($properties_to_delete));
         update_option('property_importer_last_run', current_time('mysql'));
 
         $this->send_webhook_notification([
@@ -471,13 +480,20 @@ class PropertyImporter {
 
     public function register_webhook_settings() {
         register_setting('property_importer_webhook_settings', 'property_importer_webhook_url');
+        register_setting('property_importer_webhook_settings', 'property_importer_webhook_secret');
         add_settings_section('property_importer_webhook', 'Webhook Ayarları', null, 'property_importer_webhook_settings');
         add_settings_field('property_importer_webhook_url', 'Webhook URL', [$this, 'webhook_url_callback'], 'property_importer_webhook_settings', 'property_importer_webhook');
+        add_settings_field('property_importer_webhook_secret', 'Webhook Secret', [$this, 'webhook_secret_callback'], 'property_importer_webhook_settings', 'property_importer_webhook');
     }
 
     public function webhook_url_callback() {
         $webhook_url = get_option('property_importer_webhook_url', '');
         echo '<input type="text" name="property_importer_webhook_url" value="' . esc_attr($webhook_url) . '" class="regular-text">';
+    }
+
+    public function webhook_secret_callback() {
+        $webhook_secret = get_option('property_importer_webhook_secret', '');
+        echo '<input type="text" name="property_importer_webhook_secret" value="' . esc_attr($webhook_secret) . '" class="regular-text">';
     }
 
     public function toggle_cron() {
@@ -587,6 +603,54 @@ class PropertyImporter {
                 update_post_meta($post_id, $key, $value);
             }
         }
+    }
+
+    private function register_webhook_endpoint() {
+        add_action('rest_api_init', function () {
+            register_rest_route('property-importer/v1', '/webhook', [
+                'methods' => 'POST',
+                'callback' => [$this, 'handle_webhook'],
+                'permission_callback' => [$this, 'verify_webhook_request'],
+            ]);
+        });
+    }
+
+    public function handle_webhook(WP_REST_Request $request) {
+        error_log('Webhook tetiklendi ve içe aktarma başlatıldı.');
+        
+        // AJAX nonce kontrolünü atlayarak doğrudan içe aktarma işlemini başlat
+        update_option('property_importer_is_running', true);
+        wp_schedule_single_event(time(), 'property_importer_cron');
+        
+        return new WP_REST_Response(['message' => 'İçe aktarma başlatıldı'], 200);
+    }
+
+    public function verify_webhook_request(WP_REST_Request $request) {
+        $webhook_secret = get_option('property_importer_webhook_secret', '');
+        $signature = $request->get_header('X-Webhook-Signature');
+
+        if (empty($webhook_secret) || empty($signature)) {
+            return false;
+        }
+
+        $payload = $request->get_body();
+        $expected_signature = hash_hmac('sha256', $payload, $webhook_secret);
+
+        return hash_equals($expected_signature, $signature);
+    }
+
+    public function generate_webhook_secret($length = 32) {
+        return bin2hex(random_bytes($length));
+    }
+
+    public function regenerate_webhook_secret() {
+        $this->check_user_capabilities();
+        check_ajax_referer('property_importer_nonce', 'nonce');
+
+        $new_secret = $this->generate_webhook_secret();
+        update_option('property_importer_webhook_secret', $new_secret);
+
+        wp_send_json_success(['new_secret' => $new_secret]);
     }
 }
 
