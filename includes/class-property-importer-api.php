@@ -5,30 +5,52 @@ class Property_Importer_API {
     private $api_url;
 
     public function __construct() {
+        $this->update_api_url();
+    }
+
+    private function update_api_url() {
         $this->api_url = get_option('property_importer_api_url', '');
     }
 
     private function get_cache($key) {
-        return get_transient('property_importer_api_' . $key);
+        return get_transient('property_importer_api_' . md5($this->api_url . $key));
     }
 
     private function set_cache($key, $value, $expiration = 3600) {
-        set_transient('property_importer_api_' . $key, $value, $expiration);
+        set_transient('property_importer_api_' . md5($this->api_url . $key), $value, $expiration);
     }
 
     public function fetch_properties() {
+        error_log('fetch_properties metodu başladı');
+        $this->update_api_url();
         $cached_data = $this->get_cache('properties');
-        if ($cached_data !== false) return $cached_data;
-        
-        $all_properties = $this->fetch_all_pages();
-        
-        if (is_wp_error($all_properties)) {
-            return $all_properties;
+        if ($cached_data !== false) {
+            error_log('Önbellek verisi kullanıldı');
+            return $cached_data;
         }
-
+        
+        $response = wp_remote_get($this->api_url, [
+            'sslverify' => false,
+            'timeout' => 30
+        ]);
+    
+        if (is_wp_error($response)) {
+            error_log('API hatası: ' . $response->get_error_message());
+            return $response;
+        }
+    
+        $body = wp_remote_retrieve_body($response);
+        $all_properties = json_decode($body, true);
+    
+        if (!is_array($all_properties)) {
+            error_log('API yanıtı geçersiz JSON formatında');
+            return new WP_Error('invalid_json', 'API yanıtı geçersiz JSON formatında');
+        }
+    
         $sanitized_data = array_map([$this, 'sanitize_property_data'], $all_properties);
         $this->set_cache('properties', $sanitized_data, 1800);
-
+    
+        error_log('fetch_properties metodu tamamlandı. Toplam mülk sayısı: ' . count($sanitized_data));
         return $sanitized_data;
     }
 
@@ -84,6 +106,7 @@ class Property_Importer_API {
     public function sanitize_property_data($property) {
         $sanitized = [
             'title' => sanitize_text_field($property['title']),
+            'id' => sanitize_text_field($property['id']),
             'description' => wp_kses_post($property['description']),
             'REAL_HOMES_property_price' => $this->clean_price($property['price']),
             'REAL_HOMES_property_location' => $this->sanitize_location($property['location']),

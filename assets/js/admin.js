@@ -2,7 +2,6 @@ jQuery(document).ready(function($) {
     try {
         const api = {
             startImport: () => ajaxRequest('start_import'),
-            getStats: () => ajaxRequest('get_import_stats'),
             toggleCron: () => ajaxRequest('toggle_cron')
         };
     
@@ -15,44 +14,35 @@ jQuery(document).ready(function($) {
             });
         }
     
-        function updateStats(stats) {
-            $('#total-properties').text(stats.total);
-            $('#imported-properties').text(stats.imported);
-            $('#queued-properties').text(stats.queued);
-        }
-    
         function handleAjaxError(xhr, status, error) {
             console.error('AJAX Hatası:', xhr.responseText);
             alert('Hata oluştu: ' + error + '\nLütfen konsolu kontrol edin ve yöneticinize başvurun.');
         }
 
         function updateUI(data) {
-            updateStats(data.stats);
+            if (data && typeof data === 'object') {
+                $('#cron-status').text(data.is_running ? 'Çalışıyor' : 'Durdu');
+                $('#toggle-cron').text(data.is_running ? 'Cron\'u Durdur' : 'Cron\'u Başlat');
+            } else {
+                console.error('Geçersiz veri:', data);
+            }
         }
     
-        $('#start-import').on('click', () => {
+        $('#start-import').on('click', function() {
+            console.log('İçe aktarma başlatma düğmesine tıklandı');
             api.startImport()
                 .done(response => {
-                    if (response.success) {
+                    console.log('AJAX Yanıtı:', response);
+                    if (response && response.success) {
+                        alert(response.data.message);
                         updateUI(response.data);
-                        alert('İçe aktarma başlatıldı.');
                     } else {
-                        alert('İçe aktarma başlatılamadı: ' + response.data);
+                        console.error('İçe aktarma başlatılamadı:', response);
+                        alert('İçe aktarma başlatılamadı. Lütfen konsolu kontrol edin.');
                     }
                 })
                 .fail(handleAjaxError);
         });
-    
-        // Sayfa yüklendiğinde istatistikleri al
-        api.getStats()
-            .done(response => {
-                if (response.success) {
-                    updateStats(response.data);
-                } else {
-                    console.error('İstatistikler alınamadı:', response.data);
-                }
-            })
-            .fail(handleAjaxError);
     
         $('#toggle-cron').on('click', () => {
             api.toggleCron()

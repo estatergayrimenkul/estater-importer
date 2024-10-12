@@ -11,6 +11,10 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
 class PropertyImporter {
     private static $instance = null;
 
@@ -23,6 +27,7 @@ class PropertyImporter {
 
     private function __construct() {
         add_action('plugins_loaded', [$this, 'init']);
+        add_action('property_importer_sync_cron', [$this, 'sync_properties']);
     }
 
     public function init() {
@@ -49,7 +54,6 @@ class PropertyImporter {
         add_action('wp_ajax_get_import_progress', [$this, 'get_import_progress']);
         add_action('wp_ajax_clear_logs', [$this, 'clear_logs']);
         add_action('wp_ajax_toggle_cron', [$this, 'toggle_cron']);
-        add_action('wp_ajax_get_import_stats', [$this, 'get_import_stats']);
         add_action('property_importer_cron', [$this, 'run_import']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_scripts']);
         add_action('admin_init', [$this, 'register_webhook_settings']);
@@ -75,7 +79,9 @@ class PropertyImporter {
     }
 
     public function register_settings() {
-        register_setting('property_importer_settings', 'property_importer_api_url');
+        register_setting('property_importer_settings', 'property_importer_api_url', [
+            'sanitize_callback' => [$this, 'sanitize_api_url'],
+        ]);
         add_settings_section('property_importer_main', 'API Ayarları', null, 'property_importer_settings');
         add_settings_field('property_importer_api_url', 'API URL', [$this, 'api_url_callback'], 'property_importer_settings', 'property_importer_main');
     }
@@ -85,12 +91,36 @@ class PropertyImporter {
         echo '<input type="text" name="property_importer_api_url" value="' . esc_attr($api_url) . '" class="regular-text">';
     }
 
+    public function sanitize_api_url($value) {
+        $old_value = get_option('property_importer_api_url');
+        if ($old_value !== $value) {
+            $this->clear_api_cache();
+        }
+        return esc_url_raw($value);
+    }
+
+    private function clear_api_cache() {
+        global $wpdb;
+        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_property_importer_api_%'");
+        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_timeout_property_importer_api_%'");
+    }
+
     public function start_import() {
-        $this->check_user_capabilities();
+        error_log('start_import metodu başladı');
         check_ajax_referer('property_importer_nonce', 'nonce');
+        if (!current_user_can('manage_options')) {
+            error_log('Yetkisiz erişim');
+            wp_send_json_error('Yetkisiz erişim.');
+        }
+        
         update_option('property_importer_is_running', true);
         wp_schedule_single_event(time(), 'property_importer_cron');
-        wp_send_json_success('İçe aktarma başlatıldı.');
+        
+        error_log('start_import metodu tamamlandı');
+        wp_send_json_success([
+            'message' => 'İçe aktarma başlatıldı.',
+            'is_running' => true
+        ]);
     }
 
     public function stop_import() {
@@ -103,12 +133,10 @@ class PropertyImporter {
         
         // Durdurma işlemi tamamlanana kadar kısa bir bekleme süresi ekleyin
         sleep(2);
-        
-        $stats = $this->get_import_stats();
+
         wp_send_json_success([
             'message' => 'İçe aktarma durduruldu.',
             'logs' => $this->get_logs(),
-            'stats' => $stats,
             'is_running' => false,
             'progress' => get_option('property_importer_progress', 0)
         ]);
@@ -119,19 +147,9 @@ class PropertyImporter {
         if (!current_user_can('manage_options')) {
             wp_send_json_error('Yetkisiz erişim.');
         }
-        $progress = get_option('property_importer_progress', 0);
-        $logs = $this->get_logs();
         $is_running = get_option('property_importer_is_running', false);
-        $stats = [
-            'total' => get_option('property_importer_total_properties', 0),
-            'imported' => get_option('property_importer_imported_properties', 0),
-            'queued' => get_option('property_importer_total_properties', 0) - get_option('property_importer_imported_properties', 0)
-        ];
         wp_send_json_success([
-            'progress' => $progress,
-            'logs' => $logs,
-            'is_running' => $is_running,
-            'stats' => $stats
+            'is_running' => $is_running
         ]);
     }
 
@@ -162,7 +180,7 @@ class PropertyImporter {
 
     public function run_import() {
         if (!get_option('property_importer_is_running', false)) {
-            $this->log('info', 'İçe aktarma işlemi durduruldu.');
+            $this->log('info', 'İçe aktarma işlemi durduruldu veya başlatılmadı.');
             return;
         }
 
@@ -181,6 +199,10 @@ class PropertyImporter {
         $imported = 0;
         $errors = 0;
 
+        $existing_properties = $this->get_existing_properties();
+        $api_property_ids = array_column($properties, 'id');
+        $this->log('info', 'API\'den gelen mülk ID\'leri alındı.', ['count' => count($api_property_ids)]);
+
         foreach ($properties as $property) {
             if (!get_option('property_importer_is_running', false)) {
                 $this->log('info', 'İçe aktarma işlemi kullanıcı tarafından durduruldu.');
@@ -188,7 +210,7 @@ class PropertyImporter {
             }
 
             try {
-                if ($this->import_property($property)) {
+                if ($this->import_property($property, $api_property_ids)) {
                     $imported++;
                     $this->log('success', 'Mülk başarıyla içe aktarıldı.', ['title' => $property['title']]);
                 } else {
@@ -199,85 +221,130 @@ class PropertyImporter {
                 $errors++;
                 $this->log('error', 'Mülk içe aktarılırken hata oluştu: ' . $e->getMessage(), ['title' => $property['title']]);
             }
-
             $progress = ($imported + $errors) / $total * 100;
             update_option('property_importer_progress', $progress);
 
-            $this->update_import_stats($total, $imported);
-            
-            // Her 5 mülkte bir durumu kontrol et ve kısa bir bekleme süresi ekle
             if (($imported + $errors) % 5 == 0) {
                 sleep(1);
-                if (!get_option('property_importer_is_running', false)) {
-                    $this->log('info', 'İçe aktarma işlemi kullanıcı tarafından durduruldu.');
-                    break;
-                }
             }
         }
 
-        $this->log('info', "İçe aktarma tamamlandı. Toplam: $total, Başarılı: $imported, Hata: $errors");
-        update_option('property_importer_last_run', current_time('mysql'));
+        // API'de olmayan mülkleri sil
+        $properties_to_delete = array_diff($existing_properties, $api_property_ids);
+        foreach ($properties_to_delete as $post_id => $api_id) {
+            $this->delete_property($post_id);
+            $this->log('info', 'API\'de bulunmayan mülk silindi.', ['property_id' => $post_id, 'api_id' => $api_id]);
+        }
+
         update_option('property_importer_is_running', false);
+        $this->log('info', "İçe aktarma tamamlandı. Toplam: $total, Başarılı: $imported, Hata: $errors, Silinen: " . count($properties_to_delete));
+        update_option('property_importer_last_run', current_time('mysql'));
 
         $this->send_webhook_notification([
             'event' => 'import_completed',
             'total' => $total,
             'imported' => $imported,
-            'errors' => $errors
+            'errors' => $errors,
+            'deleted' => count($properties_to_delete)
         ]);
     }
 
-    private function import_property($property) {
-        $property_data = [
+    private function import_property($property, $api_property_ids) {
+        $existing_properties = $this->get_existing_properties();
+        $property_id = $property['id'];
+
+        if (in_array($property_id, $existing_properties)) {
+            $post_id = array_search($property_id, $existing_properties);
+            $this->update_existing_property($post_id, $property);
+            $this->log('info', 'Mevcut mülk güncellendi.', ['property_id' => $post_id]);
+            return true;
+        }
+
+        $this->log('info', 'Yeni mülk ekleniyor.', ['property_id' => $property_id]);
+            
+        $post_id = wp_insert_post([
             'post_title'    => !empty($property['title']) ? sanitize_text_field($property['title']) : 'Başlıksız Mülk - ' . uniqid(),
             'post_content'  => wp_kses_post($property['description']),
             'post_status'   => 'publish',
             'post_type'     => 'property',
-            'post_author'   => 1,
-        ];
+        ]);
 
-        $post_id = wp_insert_post($property_data);
-
-        if (!is_wp_error($post_id)) {
-            update_post_meta($post_id, 'property_api_id', $property['id']);
-
-            foreach ($property as $key => $value) {
-                if ($key !== 'images') {
-                    if ($key === 'REAL_HOMES_property_location') {
-                        $location_parts = explode('/', $value);
-                        $cleaned_location = implode(', ', array_map('trim', $location_parts));
-                        update_post_meta($post_id, $key, $cleaned_location);
-                        
-                        // Ayrıca, il ve ilçe bilgilerini ayrı meta alanlara kaydedebilirsiniz
-                        if (count($location_parts) >= 2) {
-                            update_post_meta($post_id, 'property_city', trim($location_parts[0]));
-                            update_post_meta($post_id, 'property_area', trim($location_parts[1]));
-                        }
-                    } else {
-                    update_post_meta($post_id, $key, $value);
-                    }
-                }
-            }
-
-            if (!empty($property['type'])) {
-                wp_set_object_terms($post_id, $property['type'], 'property-type');
-            }
-            if (!empty($property['status'])) {
-                wp_set_object_terms($post_id, $property['status'], 'property-status');
-            }
-
-            if (isset($property['images']) && is_array($property['images'])) {
-                $this->process_property_images($post_id, $property['images']);
-            } else {
-                $this->log('warning', 'Mülk için resim bulunamadı veya geçersiz format', ['property_id' => $post_id]);
-            }
-
-            $this->log('success', 'Yeni mülk başarıyla içe aktarıldı.', ['property_id' => $post_id]);
-            return $post_id;
-        } else {
+        if (is_wp_error($post_id)) {
             $this->log('error', 'Mülk içe aktarılamadı.', ['error' => $post_id->get_error_message()]);
             return false;
         }
+
+        update_post_meta($post_id, 'property_api_id', $property['id']);
+
+        $this->update_property_meta($post_id, $property);
+        $this->process_taxonomies($post_id, $property);
+        $this->process_property_images($post_id, $property['images']);
+
+        $this->log('success', 'Yeni mülk başarıyla içe aktarıldı.', ['property_id' => $post_id]);
+        return $post_id;
+    }
+
+    // Mülkü ve ilişkili tüm verileri silen yardımcı fonksiyon
+    private function delete_property($post_id) {
+        // Mülke ait görselleri sil
+        $attachment_ids = get_posts([
+            'post_type' => 'attachment',
+            'posts_per_page' => -1,
+            'post_parent' => $post_id,
+            'fields' => 'ids',
+        ]);
+        foreach ($attachment_ids as $attachment_id) {
+            wp_delete_attachment($attachment_id, true);
+        }
+
+        // Mülke ait meta verileri sil
+        $meta_keys = get_post_custom_keys($post_id);
+        if ($meta_keys) {
+            foreach ($meta_keys as $meta_key) {
+                delete_post_meta($post_id, $meta_key);
+            }
+        }
+
+        // Mülke ait taksonomileri sil
+        $taxonomies = get_object_taxonomies('property');
+        foreach ($taxonomies as $taxonomy) {
+            wp_delete_object_term_relationships($post_id, $taxonomy);
+        }
+
+        // Mülkü sil
+        wp_delete_post($post_id, true);
+    }
+
+    public function sync_properties() {
+        $api = new Property_Importer_API();
+        $api_properties = $api->fetch_properties();
+
+        if (is_wp_error($api_properties)) {
+            $this->log('error', 'API\'den veri alınamadı: ' . $api_properties->get_error_message());
+            return;
+        }
+
+        $existing_properties = $this->get_existing_properties();
+        $api_property_ids = array_column($api_properties, 'id');
+
+        // API'den gelen mülkleri güncelle veya ekle
+        foreach ($api_properties as $property) {
+            $post_id = $this->get_post_id_by_api_id($property['id']);
+            if ($post_id) {
+                $this->update_existing_property($post_id, $property);
+            } else {
+                $this->import_property($property, $api_property_ids);
+            }
+        }
+
+        // API'de olmayan mülkleri sil
+        $properties_to_delete = array_diff($existing_properties, $api_property_ids);
+        foreach ($properties_to_delete as $post_id => $api_id) {
+            wp_delete_post($post_id, true);
+            $this->log('info', 'Mülk silindi', ['property_id' => $post_id]);
+        }
+
+        $this->log('info', 'Mülk senkronizasyonu tamamlandı');
     }
 
     private function process_property_images($property_id, $image_urls) {
@@ -402,26 +469,6 @@ class PropertyImporter {
         delete_transient('property_importer_api_' . $key);
     }
 
-    public function get_import_stats() {
-        $this->check_user_capabilities();
-        check_ajax_referer('property_importer_nonce', 'nonce');
-
-        $total = get_option('property_importer_total_properties', 0);
-        $imported = get_option('property_importer_imported_properties', 0);
-        $queued = $total - $imported;
-
-        wp_send_json_success([
-            'total' => $total,
-            'imported' => $imported,
-            'queued' => $queued
-        ]);
-    }
-
-    public function update_import_stats($total, $imported) {
-        update_option('property_importer_total_properties', $total);
-        update_option('property_importer_imported_properties', $imported);
-    }
-
     public function register_webhook_settings() {
         register_setting('property_importer_webhook_settings', 'property_importer_webhook_url');
         add_settings_section('property_importer_webhook', 'Webhook Ayarları', null, 'property_importer_webhook_settings');
@@ -461,89 +508,26 @@ class PropertyImporter {
     }
 
     public function activate_cron() {
-        if (!wp_next_scheduled('property_importer_cron')) {
-            wp_schedule_event(time(), 'daily', 'property_importer_cron');
-        }
         if (!wp_next_scheduled('property_importer_sync_cron')) {
             wp_schedule_event(time(), 'hourly', 'property_importer_sync_cron');
         }
     }
 
     public function deactivate_cron() {
-        $timestamp = wp_next_scheduled('property_importer_cron');
+        $timestamp = wp_next_scheduled('property_importer_sync_cron');
         if ($timestamp) {
-            wp_unschedule_event($timestamp, 'property_importer_cron');
+            wp_unschedule_event($timestamp, 'property_importer_sync_cron');
         }
-        $sync_timestamp = wp_next_scheduled('property_importer_sync_cron');
-        if ($sync_timestamp) {
-            wp_unschedule_event($sync_timestamp, 'property_importer_sync_cron');
-        }
-    }
-
-    private function update_existing_property($post_id, $property_data) {
-        $updated_post = array(
-            'ID' => $post_id,
-            'post_title' => $property_data['title'],
-            'post_content' => $property_data['description'],
-        );
-        wp_update_post($updated_post);
-
-        foreach ($property_data as $key => $value) {
-            if ($key !== 'images') {
-                update_post_meta($post_id, $key, $value);
-            }
-        }
-
-        if (isset($property_data['images']) && is_array($property_data['images'])) {
-            $this->process_property_images($post_id, $property_data['images']);
-        }
-
-        $this->log('info', 'Mülk güncellendi', ['property_id' => $post_id]);
-    }
-
-    private function delete_property($post_id) {
-        wp_delete_post($post_id, true);
-        $this->log('info', 'Mülk silindi', ['property_id' => $post_id]);
-    }
-
-    public function sync_properties() {
-        $api = new Property_Importer_API();
-        $properties = $api->fetch_properties();
-
-        if (is_wp_error($properties)) {
-            $this->log('error', 'API\'den veri alınamadı: ' . $properties->get_error_message());
-            return;
-        }
-
-        $existing_properties = $this->get_existing_properties();
-        $api_property_ids = array_column($properties, 'id');
-
-        foreach ($properties as $property) {
-            $post_id = $this->get_post_id_by_api_id($property['id']);
-            if ($post_id) {
-                $this->update_existing_property($post_id, $property);
-            } else {
-                $this->import_property($property);
-            }
-        }
-
-        foreach ($existing_properties as $post_id => $api_id) {
-            if (!in_array($api_id, $api_property_ids)) {
-                $this->delete_property($post_id);
-            }
-        }
-
-        $this->log('info', 'Mülk senkronizasyonu tamamlandı');
     }
 
     private function get_existing_properties() {
-        $args = array(
-            'post_type' => 'property',
+        $args = [
+            'post_type'      => 'property',
             'posts_per_page' => -1,
-            'fields' => 'ids',
-        );
+            'fields'         => 'ids',
+        ];
         $query = new WP_Query($args);
-        $properties = array();
+        $properties = [];
 
         foreach ($query->posts as $post_id) {
             $api_id = get_post_meta($post_id, 'property_api_id', true);
@@ -556,16 +540,53 @@ class PropertyImporter {
     }
 
     private function get_post_id_by_api_id($api_id) {
-        $args = array(
-            'post_type' => 'property',
-            'meta_key' => 'property_api_id',
-            'meta_value' => $api_id,
+        $args = [
+            'post_type'      => 'property',
+            'meta_key'       => 'property_api_id',
+            'meta_value'     => $api_id,
             'posts_per_page' => 1,
-            'fields' => 'ids',
-        );
+            'fields'         => 'ids',
+        ];
         $query = new WP_Query($args);
 
         return $query->posts ? $query->posts[0] : null;
+    }
+
+    private function update_existing_property($post_id, $property) {
+        wp_update_post([
+            'ID'           => $post_id,
+            'post_title'   => !empty($property['title']) ? sanitize_text_field($property['title']) : 'Başlıksız Mülk - ' . uniqid(),
+            'post_content' => wp_kses_post($property['description']),
+        ]);
+
+        // Fiyat güncelleme
+        if (isset($property['REAL_HOMES_property_price'])) {
+            update_post_meta($post_id, 'REAL_HOMES_property_price', $property['REAL_HOMES_property_price']);
+        }
+
+        $this->update_property_meta($post_id, $property);
+        $this->process_taxonomies($post_id, $property);
+        $this->process_property_images($post_id, $property['images']);
+
+        $this->log('success', 'Mevcut mülk güncellendi.', ['property_id' => $post_id]);
+        return $post_id;
+    }
+
+    private function process_taxonomies($post_id, $property) {
+        if (!empty($property['type'])) {
+            wp_set_object_terms($post_id, $property['type'], 'property-type');
+        }
+        if (!empty($property['status'])) {
+            wp_set_object_terms($post_id, $property['status'], 'property-status');
+        }
+    }
+
+    private function update_property_meta($post_id, $property) {
+        foreach ($property as $key => $value) {
+            if ($key !== 'images' && $key !== 'title' && $key !== 'description') {
+                update_post_meta($post_id, $key, $value);
+            }
+        }
     }
 }
 

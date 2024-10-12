@@ -17,13 +17,6 @@ if (!defined('ABSPATH')) {
     
     <hr>
     
-    <h2>İçe Aktarma İşlemi</h2>
-    <div class="import-stats">
-        <p>Toplam Mülk: <span id="total-properties">0</span></p>
-        <p>İçe Aktarılan: <span id="imported-properties">0</span></p>
-        <p>Kuyrukta: <span id="queued-properties">0</span></p>
-    </div>
-    
     <button id="start-import" class="button button-primary">İçe Aktarmayı Başlat</button>
     
     <hr>
