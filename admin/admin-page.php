@@ -20,19 +20,8 @@ if (!defined('ABSPATH')) {
     <button id="start-import" class="button button-primary">İçe Aktarmayı Başlat</button>
     
     <hr>
-    
-    <h2>Webhook Ayarları</h2>
-    <form method="post" action="options.php">
-        <?php
-        settings_fields('property_importer_webhook_settings');
-        do_settings_sections('property_importer_webhook_settings');
-        submit_button('Webhook Ayarlarını Kaydet');
-        ?>
-    </form>
 
     <p>Webhook URL'niz: <?php echo esc_url(rest_url('property-importer/v1/webhook')); ?></p>
-    <p>Webhook Secret: <span id="webhook-secret"><?php echo esc_html(get_option('property_importer_webhook_secret', '')); ?></span></p>
-    <button id="regenerate-secret" class="button button-secondary">Yeni Secret Oluştur</button>
     
     <div class="cron-settings">
         <h3>Cron Ayarları</h3>

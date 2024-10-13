@@ -1,6 +1,6 @@
 <?php
-$webhook_url = 'http://examplecom.local/wp-json/property-importer/v1/webhook';
-$webhook_secret = 'fb2f126d56ec690384461808dbe1ea3de180010085ff57fa99739a54b3c1063a';
+$webhook_url = 'https://thankhat.s3-tastewp.com/wp-json/property-importer/v1/webhook';
+$webhook_secret = '1d179a8b274d3ab408f9350aee73db85eaca8fbdb08659dd3ce4a1b39a4aef0c';
 
 $payload = json_encode(['event' => 'test']);
 
